@@ -2,8 +2,10 @@ name: Daily Coursework Journal Submission
 
 on:
   schedule:
-    # 4:00 PM IST (16:00 IST) = 10:30 AM UTC, Monday–Friday only
+    # 4:00 PM IST (16:00 IST) = 10:30 AM UTC, Monday–Friday (Daily Form Submission)
     - cron: '30 10 * * 1-5'
+    # 4:00 PM IST = 10:30 AM UTC, Saturday & Sunday (Session Keepalive Heartbeat)
+    - cron: '30 10 * * 0,6'
   workflow_dispatch:
 
 jobs:
@@ -38,6 +40,7 @@ jobs:
           echo "storageState.json restored successfully."
 
       - name: Run Journal Submission Script
+        id: submit
         env:
           FORM_ID: ${{ secrets.FORM_ID }}
           ENTRY_MAP: ${{ secrets.ENTRY_MAP }}
@@ -49,4 +52,31 @@ jobs:
           STORAGE_STATE_PATH: storageState.json
           DISABLE_SUBMIT: "false"
           DRY_RUN: "false"
-        run: npm start
+        run: |
+          # Detect weekend days (Saturday=6, Sunday=7 in ISO %u)
+          DAY_OF_WEEK=$(date -u +%u)
+          if [ "$DAY_OF_WEEK" -ge 6 ]; then
+            echo "Weekend detected (day $DAY_OF_WEEK): Running keepalive session refresh to keep Google tokens active."
+            node src/submit.js --keepalive
+          else
+            npm start
+          fi
+
+      - name: Write back updated storageState to GitHub Secrets
+        if: always() && steps.submit.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.COMMIT_READ_TOKEN }}
+        run: |
+          if [ -f storageState.json ]; then
+            if [ -z "$GH_TOKEN" ]; then
+              echo "::warning::COMMIT_READ_TOKEN is not set; cannot automatically update STORAGE_STATE_BASE64 secret."
+            else
+              echo "Encoding updated storageState.json to base64..."
+              NEW_STATE_BASE64=$(base64 -w 0 storageState.json)
+              echo "Syncing updated session state back to STORAGE_STATE_BASE64 secret..."
+              gh secret set STORAGE_STATE_BASE64 --body "$NEW_STATE_BASE64" --repo "${{ github.repository }}"
+              echo "✅ Successfully synced fresh session state back to STORAGE_STATE_BASE64 secret."
+            fi
+          else
+            echo "⚠️ storageState.json not found, skipping secret sync."
+          fi

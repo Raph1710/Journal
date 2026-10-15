@@ -1,8 +1,10 @@
 import assert from 'node:assert';
 import test from 'node:test';
+import fs from 'node:fs';
+import path from 'node:path';
 import { getMidnightISO, getFormattedToday, generateCommitSummary } from '../src/summarizer.js';
 import { buildPrefilledUrl } from '../src/urlBuilder.js';
-import { isSunday } from '../src/submit.js';
+import { isSunday, persistStorageState } from '../src/submit.js';
 import { config } from '../src/config.js';
 
 test('isSunday correctly detects Sunday vs non-Sunday', () => {
@@ -112,3 +114,25 @@ test('getMidnightISO and getFormattedToday handle invalid dates and fallback tim
   const formatted = getFormattedToday('Invalid/Timezone', new Date('invalid'));
   assert.match(formatted, /^\d{4}-\d{2}-\d{2}$/);
 });
+
+test('persistStorageState persists context cookies to destination file', async () => {
+  const testDir = path.resolve('test-temp');
+  const testFile = path.join(testDir, 'test-storage.json');
+
+  const mockContext = {
+    async storageState({ path: targetPath }) {
+      fs.writeFileSync(targetPath, JSON.stringify({ cookies: [{ name: 'TEST_COOKIE', value: '123' }] }));
+    },
+  };
+
+  const success = await persistStorageState(mockContext, testFile);
+  assert.strictEqual(success, true);
+  assert.ok(fs.existsSync(testFile));
+
+  const parsed = JSON.parse(fs.readFileSync(testFile, 'utf8'));
+  assert.strictEqual(parsed.cookies[0].name, 'TEST_COOKIE');
+
+  // Clean up
+  fs.rmSync(testDir, { recursive: true, force: true });
+});
+

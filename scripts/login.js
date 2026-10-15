@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import readline from 'readline';
 import path from 'path';
 import fs from 'fs';
+import { execSync } from 'child_process';
 import { config } from '../src/config.js';
 
 async function promptEnter(query) {
@@ -35,7 +36,13 @@ async function runInteractiveLogin() {
   try {
     browser = await chromium.launch({
       headless: false,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-infobars',
+        '--window-size=1280,800',
+      ],
     });
   } catch (err) {
     if (err.message.includes('Executable doesn\'t exist') || err.message.includes('npx playwright install')) {
@@ -47,7 +54,19 @@ async function runInteractiveLogin() {
     throw err;
   }
 
-  const context = await browser.newContext();
+  const context = await browser.newContext({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 800 },
+    locale: 'en-US',
+  });
+
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+    });
+  });
+
   const page = await context.newPage();
 
   await page.goto(targetUrl);
@@ -120,6 +139,10 @@ async function runInteractiveLogin() {
     console.log('\n⚠️ Could not automatically detect entry IDs from DOM. You can find them via "Get pre-filled link".');
   }
 
+  // Allow background rotation requests to settle
+  console.log('\nAllowing Google session tokens to settle...');
+  await page.waitForTimeout(2500);
+
   // Save session state
   const storagePath = path.resolve(config.storageStatePath || 'storageState.json');
   const storageDir = path.dirname(storagePath);
@@ -132,11 +155,34 @@ async function runInteractiveLogin() {
 
   await browser.close();
 
+  // Encode to Base64
+  const base64State = fs.readFileSync(storagePath).toString('base64');
+  let copiedToClipboard = false;
+
+  try {
+    if (process.platform === 'win32') {
+      execSync('clip', { input: base64State, stdio: ['pipe', 'ignore', 'ignore'] });
+      copiedToClipboard = true;
+    } else if (process.platform === 'darwin') {
+      execSync('pbcopy', { input: base64State, stdio: ['pipe', 'ignore', 'ignore'] });
+      copiedToClipboard = true;
+    } else if (process.platform === 'linux') {
+      execSync('xclip -selection clipboard', { input: base64State, stdio: ['pipe', 'ignore', 'ignore'] });
+      copiedToClipboard = true;
+    }
+  } catch {}
+
   console.log('\n============================== IMPORTANT ==============================');
   console.log('1. DO NOT commit storageState.json to git or source control!');
   console.log('2. DO NOT execute this interactive login script inside CI / GitHub Actions.');
-  console.log('3. Encode storageState.json to base64 and store it as a GitHub secret:');
-  console.log('   STORAGE_STATE_BASE64');
+  console.log('3. Update STORAGE_STATE_BASE64 in your GitHub Repository Secrets:');
+  if (copiedToClipboard) {
+    console.log('   📋 Base64 string was AUTOMATICALLY COPIED to your clipboard!');
+    console.log('   Simply go to GitHub Repo -> Settings -> Secrets -> Actions -> STORAGE_STATE_BASE64 and paste it.');
+  } else {
+    console.log('   PowerShell command to copy base64 to clipboard:');
+    console.log('   [Convert]::ToBase64String([IO.File]::ReadAllBytes("storageState.json")) | Set-Clipboard');
+  }
   console.log('=======================================================================\n');
 }
 

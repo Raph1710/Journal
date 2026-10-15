@@ -24,17 +24,43 @@ export function isSunday(timezone = 'Asia/Kolkata', referenceDate = new Date()) 
   return dayStr === 'Sun';
 }
 
+/**
+ * Persists the current browser context cookies and storage state back to disk.
+ */
+export async function persistStorageState(context, targetPath) {
+  try {
+    const resolvedPath = path.resolve(targetPath);
+    const dir = path.dirname(resolvedPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    await context.storageState({ path: resolvedPath });
+    console.log(`  💾 Updated session state successfully saved to: ${resolvedPath}`);
+    return true;
+  } catch (err) {
+    console.warn(`  ⚠️ Warning: Could not save updated storage state: ${err.message}`);
+    return false;
+  }
+}
+
 async function runScheduledSubmission() {
   console.log('=== Automated Coursework Journal Submission ===\n');
 
-  if (config.dryRun) {
+  const isKeepalive = process.argv.includes('--keepalive') || process.env.KEEPALIVE === 'true';
+
+  if (isKeepalive) {
+    console.log('🔄 [KEEPALIVE MODE] Session renewal requested. Verifying login and renewing cookies without submitting.\n');
+  } else if (config.dryRun) {
     console.log('⚠️  [DRY RUN MODE ENABLED] Form submission is disabled via configuration (DRY_RUN / DISABLE_SUBMIT).\n');
   }
 
-  // 1. Skip on Sundays
+  // 1. Skip on Sundays (unless keepalive heartbeat is requested)
   if (isSunday(config.timezone)) {
-    console.log(`[SKIP] Today is Sunday in ${config.timezone}. Skipping journal submission as scheduled.`);
-    process.exit(0);
+    if (!isKeepalive) {
+      console.log(`[SKIP] Today is Sunday in ${config.timezone}. Skipping journal submission as scheduled.`);
+      process.exit(0);
+    }
+    console.log(`[SUNDAY KEEPALIVE] Today is Sunday in ${config.timezone}. Running session refresh to keep Google tokens active.`);
   }
 
   // 2. Validate session file existence
@@ -79,12 +105,18 @@ async function runScheduledSubmission() {
 
   console.log(`Navigating to pre-filled Google Form URL...`);
 
-  // 6. Launch Headless Browser with Restored Session
+  // 6. Launch Headless Browser with Restored Session & Anti-Detection
   let browser;
   try {
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-infobars',
+        '--window-size=1280,800',
+      ],
     });
   } catch (err) {
     if (err.message.includes('Executable doesn\'t exist') || err.message.includes('npx playwright install')) {
@@ -95,25 +127,55 @@ async function runScheduledSubmission() {
     throw err;
   }
 
+  let context;
   try {
-    const context = await browser.newContext({
+    context = await browser.newContext({
       storageState: storagePath,
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 800 },
+      locale: 'en-US',
+      timezoneId: config.timezone || 'Asia/Kolkata',
+      deviceScaleFactor: 1,
+    });
+
+    // Remove navigator.webdriver indicator to prevent headless bot detection
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+      });
     });
 
     const page = await context.newPage();
-    const response = await page.goto(prefilledUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const response = await page.goto(prefilledUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     if (!response || response.status() >= 400) {
       throw new Error(`Failed to load Google Form. HTTP Status: ${response ? response.status() : 'Unknown'}`);
     }
 
-    const currentUrl = page.url();
+    let currentUrl = page.url();
+
+    // If transiently bouncing through CheckCookie, allow redirect to resolve
+    if (currentUrl.includes('CheckCookie')) {
+      await page.waitForURL((url) => !url.href.includes('CheckCookie'), { timeout: 8000 }).catch(() => {});
+      currentUrl = page.url();
+    }
 
     // Check if redirected to Google Authentication page
     if (currentUrl.includes('accounts.google.com') || currentUrl.includes('ServiceLogin')) {
       throw new Error(
         'Authentication failed! redirected to Google sign-in page. Saved session in storageState.json is expired or invalid. Please run "npm run login" again to refresh session.'
       );
+    }
+
+    // In keepalive mode: session verified and renewed
+    if (isKeepalive) {
+      console.log('Page loaded successfully. Validating session and renewing cookies...');
+      await page.waitForTimeout(3000);
+      await persistStorageState(context, storagePath);
+      console.log('\n🎉 SUCCESS: Google session verified and renewed. Updated storageState.json saved.');
+      await browser.close();
+      process.exit(0);
     }
 
     console.log('Page loaded. Processing form sections...');
@@ -283,6 +345,7 @@ async function runScheduledSubmission() {
         if (config.dryRun) {
           console.log('\n🔒 [DRY RUN / FORM FILL DISABLED] Submit button located. Form was filled & validated successfully!');
           console.log('Skipping actual form submission as DRY_RUN / DISABLE_SUBMIT is enabled.\n');
+          await persistStorageState(context, storagePath);
           await browser.close();
           process.exit(0);
         }
@@ -326,6 +389,7 @@ async function runScheduledSubmission() {
     if (config.dryRun) {
       await takeScreenshot('dryrun-final');
       console.log('\n🔒 [DRY RUN / FORM FILL DISABLED] Form process completed in Dry Run mode.');
+      await persistStorageState(context, storagePath);
       await browser.close();
       process.exit(0);
     }
@@ -352,6 +416,9 @@ async function runScheduledSubmission() {
       await page.screenshot({ path: 'submit-result.png', fullPage: true });
       console.log('\n✅ Form submitted. Could not detect confirmation text — check submit-result.png to verify.');
     }
+
+    // Persist refreshed session cookies for subsequent runs
+    await persistStorageState(context, storagePath);
     await browser.close();
     process.exit(0);
   } catch (error) {

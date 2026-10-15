@@ -75,12 +75,15 @@
   - `generateCommitSummary(opts)`: Fetches commits from GitHub API, extracts unique first-line messages, or gracefully returns default summary text if unconfigured/offline.
 
 ### 4. `src/submit.js` — Playwright Automation Engine
-- **Purpose**: Main execution entrypoint for headless browser form interaction.
+- **Purpose**: Main execution entrypoint for headless browser form interaction with anti-detection and state write-back.
 - **Key Logic**:
-  - `isSunday(timezone, date)`: Returns `true` if current day is Sunday in target timezone to skip weekend executions cleanly (`exit 0`).
+  - `persistStorageState(context, targetPath)`: Exports refreshed browser context cookies/localStorage back to disk after navigation, ensuring Google's rotating tokens (`__Secure-1PSIDRTS`, `S`) are preserved for future runs.
+  - `--keepalive` Mode: Validates the Google session, allows background rotating tokens to settle, saves the renewed session state to disk, and exits without submitting the form. Used by weekend scheduled workflows.
+  - Anti-Detection Configuration: Disables `AutomationControlled` blink features, masks `navigator.webdriver`, configures realistic desktop User-Agent, viewport (1280x800), and IST timezone emulation to prevent datacenter IP bot-flagging.
+  - `isSunday(timezone, date)`: Returns `true` if current day is Sunday in target timezone to skip weekend submissions cleanly (`exit 0`), unless `--keepalive` is specified.
   - `fillCurrentPage()`: Automatically dismisses "Continue draft" modals, checks mandatory email consent checkboxes, selects working day radio options, and fills empty text inputs/textareas.
   - Page Loop: Iterates through multi-section forms by locating `Next` and `Submit` buttons, saving progress screenshots to `screenshots/`.
-  - Dry Run Handling: Logs form validation success without triggering the final submit click when dry-run mode is active.
+  - Dry Run Handling: Logs form validation success without triggering the final submit click when dry-run mode is active, while still persisting refreshed cookies.
 
 ### 5. `scripts/login.js` & `scripts/diagnose-form.js` — Utility Tools
 - **`login.js`**: Interactive authentication CLI tool that launches visible Chromium, waits for Google sign-in, inspects form field names, and writes `storageState.json`.
